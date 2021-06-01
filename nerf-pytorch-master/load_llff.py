@@ -110,9 +110,13 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
             return imageio.imread(f, ignoregamma=True)
         else:
             return imageio.imread(f)
-        
-    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
-    imgs = np.stack(imgs, -1)  
+
+    if len(sh)>2:
+        imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    else:
+        imgs = imgs = [imread(f)/255. for f in imgfiles]
+
+    imgs = np.stack(imgs, -1)
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs

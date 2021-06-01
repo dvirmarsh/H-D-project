@@ -7,8 +7,10 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
+
+# print(torch.__version__)
 
 import matplotlib.pyplot as plt
 
@@ -17,6 +19,7 @@ from run_nerf_helpers import *
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
+from load_satellite import load_satellite_data
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -178,6 +181,11 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
+    if args.dataset_type == 'satellite':
+        is_gray = True
+    else:
+        is_gray = False
+
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     input_ch_views = 0
@@ -188,14 +196,14 @@ def create_nerf(args):
     skips = [4]
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
-                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, is_gray=is_gray).to(device)
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
-                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, is_gray=is_gray).to(device)
         grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
@@ -279,10 +287,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    # rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    rgb = torch.sigmoid(raw[...,:raw.shape[2]-1])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+        # noise = torch.randn(raw[...,3].shape) * raw_noise_std
+        noise = torch.randn(raw[...,raw.shape[2]-1].shape) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
@@ -290,7 +300,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[...,raw.shape[2]-1] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
@@ -516,6 +526,10 @@ def config_parser():
     parser.add_argument("--llffhold", type=int, default=8, 
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
+    ## satellite flags
+    parser.add_argument("--satellitehold", type=int, default=8,
+                        help='will take every 1/N images as satellite test set, paper uses 8')
+
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
@@ -592,6 +606,36 @@ def train():
         near = hemi_R-1.
         far = hemi_R+1.
 
+    elif args.dataset_type == 'satellite':
+        images, poses, bds, render_poses, i_test = load_satellite_data(args.datadir, factor=None,
+                                                                  recenter=True, bd_factor=None,
+                                                                  spherify=args.spherify)
+        hwf = poses[0,:3,-1]
+        poses = poses[:,:3,:4]
+        print('Loaded satellite', images.shape, render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.satellitehold > 0:
+            print('Auto satellite holdout,', args.llffhold)
+            i_test = np.arange(images.shape[0])[::args.satellitehold]
+            if i_test != [10]:
+                i_test = [10]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                            (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = np.ndarray.min(bds) * .9
+            far = np.ndarray.max(bds) * 1.
+
+        else:
+            near = 0.
+            far = 1.
+        print('NEAR FAR', near, far)
+
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
@@ -661,6 +705,8 @@ def train():
         print('get rays')
         rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
+        if args.dataset_type == 'satellite':
+            images = np.repeat(images[...,np.newaxis], 3, 3)
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
@@ -742,6 +788,8 @@ def train():
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
+        if args.dataset_type == 'satellite':
+            target_s = target_s[:,0]
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
@@ -853,6 +901,6 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
