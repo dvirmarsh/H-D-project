@@ -68,7 +68,7 @@ def get_embedder(multires, i=0):
 
 # Model
 class NeRF(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False, is_gray=False):
         """ 
         """
         super(NeRF, self).__init__()
@@ -92,7 +92,12 @@ class NeRF(nn.Module):
         if use_viewdirs:
             self.feature_linear = nn.Linear(W, W)
             self.alpha_linear = nn.Linear(W, 1)
-            self.rgb_linear = nn.Linear(W//2, 3)
+            if is_gray:
+                self.rgb_linear = nn.Linear(W//2, 1)
+            else:
+                self.rgb_linear = nn.Linear(W//2, 3)
+
+            # TODO: changd rgb_linear to gray for satellite images
         else:
             self.output_linear = nn.Linear(W, output_ch)
 
